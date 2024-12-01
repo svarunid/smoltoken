@@ -4,6 +4,7 @@
 #![feature(test)]
 
 use std::collections::HashSet;
+use std::string::FromUtf8Error;
 
 // use rayon::prelude::*;
 use fancy_regex::Regex;
@@ -13,13 +14,23 @@ type Byte = u8;
 type Rank = u32; // Type alias for token IDs
 
 #[derive(Debug, Clone)]
-pub struct DecodeKeyError {
-    token: Rank,
+pub enum DecodeError {
+    TokenError(Rank),
+    Utf8Error(FromUtf8Error),
 }
 
-impl std::fmt::Display for DecodeKeyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Invalid token for decoding: {}", self.token)
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TokenError(token) => write!(f, "Invalid token for decoding: {}", token),
+            Self::Utf8Error(err) => std::fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl From<FromUtf8Error> for DecodeError {
+    fn from(err: FromUtf8Error) -> Self {
+        DecodeError::Utf8Error(err)
     }
 }
 
@@ -101,7 +112,7 @@ impl BytePairTokenizer {
             .collect()
     }
 
-    fn decode_native(&self, tokens: &[Rank]) -> Result<Vec<Byte>, DecodeKeyError> {
+    fn decode_native(&self, tokens: &[Rank]) -> Result<Vec<Byte>, DecodeError> {
         let mut bytes: Vec<Byte> = Vec::with_capacity(tokens.len() * 2);
         for &token in tokens {
             let token_bytes = match self.decoder.get(&token) {
@@ -109,7 +120,7 @@ impl BytePairTokenizer {
                 None => self
                     .special_decoder
                     .get(&token)
-                    .ok_or(DecodeKeyError { token })?,
+                    .ok_or(DecodeError::TokenError(token))?,
             };
             bytes.extend(token_bytes);
         }
@@ -199,10 +210,10 @@ impl BytePairTokenizer {
     }
 
     /// Decodes tokens back to text. Returns `DecodeKeyError` if token not present in vocabulary.
-    pub fn decode_ordinary(&self, tokens: &[Rank]) -> Result<Vec<Byte>, DecodeKeyError> {
+    pub fn decode_ordinary(&self, tokens: &[Rank]) -> Result<String, DecodeError> {
         // Decoupling the implementation earlier to avoid code repetition when
         // implementing variants of `decode` method later.
-        self.decode_native(tokens)
+        Ok(String::from_utf8(self.decode_native(tokens)?)?)
     }
 
     ///  Trains the byte pair encoding algorithm and building its vocabulary from scratch.
@@ -367,16 +378,13 @@ mod tests {
         let tok = setup();
 
         assert_eq!(
-            String::from_utf8(
-                tok.decode_ordinary(&vec![0, 1, 2, 15, 3, 4, 5, 6, 7])
-                    .unwrap()
-            )
-            .unwrap(),
+            tok.decode_ordinary(&vec![0, 1, 2, 15, 3, 4, 5, 6, 7])
+                .unwrap(),
             "Hello<|endoftext|>, world!"
         );
 
         assert_eq!(
-            String::from_utf8(tok.decode_ordinary(&vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap()).unwrap(),
+            tok.decode_ordinary(&vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap(),
             "Hello, world!"
         );
     }
@@ -385,7 +393,10 @@ mod tests {
     fn fail_to_decode() {
         let tok = setup();
 
-        assert!(tok.decode_ordinary(&vec![200, 300]).is_err());
+        matches!(
+            tok.decode_ordinary(&vec![200, 300]).unwrap_err(),
+            DecodeError::TokenError(_)
+        );
     }
 }
 
