@@ -185,7 +185,7 @@ impl BytePairTokenizer {
                     }
                     ranks.extend(self.encode_ordinary(&text[start..special.start()]));
                     ranks.push(self.special_encoder[special.as_str().as_bytes()]);
-                    start += special.end() + 1;
+                    start += special.end();
                 }
                 None => {
                     if start != text.len() {
@@ -289,4 +289,111 @@ impl BytePairTokenizer {
 
         Self::new(pattern, encoder, decoder, special_tokens)
     }
+}
+
+extern crate test;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> BytePairTokenizer {
+        let pattern = Regex::new(r"\S+|\s+\S+").unwrap();
+        let mut encoder: HashMap<Vec<Byte>, Rank> = HashMap::default();
+        encoder.insert(b"He".to_vec(), 0);
+        encoder.insert(b"ll".to_vec(), 1);
+        encoder.insert(b"o".to_vec(), 2);
+        encoder.insert(b",".to_vec(), 3);
+        encoder.insert(b" w".to_vec(), 4);
+        encoder.insert(b"or".to_vec(), 5);
+        encoder.insert(b"ld".to_vec(), 6);
+        encoder.insert(b"!".to_vec(), 7);
+        encoder.insert(b"<|".to_vec(), 8);
+        encoder.insert(b"en".to_vec(), 9);
+        encoder.insert(b"do".to_vec(), 10);
+        encoder.insert(b"ft".to_vec(), 11);
+        encoder.insert(b"ex".to_vec(), 12);
+        encoder.insert(b"t".to_vec(), 13);
+        encoder.insert(b"|>".to_vec(), 14);
+
+        let decoder: HashMap<Rank, Vec<Byte>> = encoder
+            .iter()
+            .map(|(bytes, rank)| (*rank, bytes.clone()))
+            .collect();
+        let mut special_tokens: HashSet<&str> = HashSet::new();
+        special_tokens.insert("<|endoftext|>");
+
+        BytePairTokenizer::new(pattern, encoder, decoder, special_tokens)
+    }
+
+    #[test]
+    fn encode_without_special_tokens() {
+        let tok = setup();
+
+        assert_eq!(
+            tok.encode_ordinary("Hello, world!"),
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        );
+
+        assert_eq!(
+            tok.encode_ordinary("Hello<|endoftext|>, world!"),
+            vec![0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn encode_with_allowed_special_tokens() {
+        let tok = setup();
+        let mut allowed_special = HashSet::new();
+        allowed_special.insert("<|endoftext|>");
+
+        assert_eq!(
+            tok.encode("Hello<|endoftext|>, world!", Some(allowed_special)),
+            vec![0, 1, 2, 15, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn encode_with_all_special_tokens() {
+        let tok = setup();
+
+        assert_eq!(
+            tok.encode("Hello<|endoftext|>, world!", None),
+            vec![0, 1, 2, 15, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn decode_tokens() {
+        let tok = setup();
+
+        assert_eq!(
+            String::from_utf8(
+                tok.decode_ordinary(&vec![0, 1, 2, 15, 3, 4, 5, 6, 7])
+                    .unwrap()
+            )
+            .unwrap(),
+            "Hello<|endoftext|>, world!"
+        );
+
+        assert_eq!(
+            String::from_utf8(tok.decode_ordinary(&vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap()).unwrap(),
+            "Hello, world!"
+        );
+    }
+
+    #[test]
+    fn fail_to_decode() {
+        let tok = setup();
+
+        assert!(tok.decode_ordinary(&vec![200, 300]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use test::Bencher;
+
+    #[bench]
+    fn train(b: &mut Bencher) {}
 }
