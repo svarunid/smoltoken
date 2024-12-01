@@ -1,9 +1,9 @@
-//! A simple byte pair encoding tokenizer library. The code to encode text
-//! was taken from [tiktoken](https://github.com/openai/tiktoken/) library.
-//! You can use this to train BPE on your own data. :-)
+//! A tokenizer library that implements byte pair encoding algorithm to encode/decode text.
+//! Intended to be used to train tokenizers for language models. (Heavily inspired by
+//! [tiktoken](https://github.com/openai/tiktoken))
 #![feature(test)]
 
-extern crate test;
+use std::collections::HashSet;
 
 // use rayon::prelude::*;
 use fancy_regex::Regex;
@@ -11,13 +11,6 @@ use rustc_hash::FxHashMap as HashMap;
 
 type Byte = u8;
 type Rank = u32; // Type alias for token IDs
-
-pub struct BytePairTokenizer {
-    pattern: Regex,
-    special_pattern: Regex,
-    encoder: HashMap<Vec<Byte>, Rank>,
-    decoder: HashMap<Rank, Vec<Byte>>,
-}
 
 #[derive(Debug, Clone)]
 pub struct DecodeKeyError {
@@ -28,6 +21,16 @@ impl std::fmt::Display for DecodeKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "Invalid token for decoding: {}", self.token)
     }
+}
+
+/// A tokenizer that uses byte pair encoding algorithm to encode/decode text.
+pub struct BytePairTokenizer {
+    pattern: Regex,
+    encoder: HashMap<Vec<Byte>, Rank>,
+    decoder: HashMap<Rank, Vec<Byte>>,
+    special_pattern: Regex,
+    special_encoder: HashMap<Vec<Byte>, Rank>,
+    special_decoder: HashMap<Rank, Vec<Byte>>,
 }
 
 impl BytePairTokenizer {
@@ -101,9 +104,15 @@ impl BytePairTokenizer {
     fn decode_native(&self, tokens: &[Rank]) -> Result<Vec<Byte>, DecodeKeyError> {
         let mut bytes: Vec<Byte> = Vec::with_capacity(tokens.len() * 2);
         for &token in tokens {
-            bytes.extend(self.decoder.get(&token).ok_or(DecodeKeyError { token })?);
+            let token_bytes = match self.decoder.get(&token) {
+                Some(bytes) => bytes,
+                None => self
+                    .special_decoder
+                    .get(&token)
+                    .ok_or(DecodeKeyError { token })?,
+            };
+            bytes.extend(token_bytes);
         }
-
         Ok(bytes)
     }
 }
@@ -111,65 +120,98 @@ impl BytePairTokenizer {
 impl BytePairTokenizer {
     pub fn new(
         pattern: Regex,
-        special_pattern: Regex,
         encoder: HashMap<Vec<Byte>, Rank>,
         decoder: HashMap<Rank, Vec<Byte>>,
+        special_tokens: HashSet<&str>,
     ) -> Self {
-        BytePairTokenizer {
+        let mut rank = encoder.len() as Rank;
+        let mut special_encoder = HashMap::default();
+        let mut special_decoder = HashMap::default();
+        for &special in &special_tokens {
+            let bytes = special.as_bytes().to_vec();
+            special_encoder.insert(bytes.clone(), rank);
+            special_decoder.insert(rank, bytes);
+
+            rank += 1;
+        }
+
+        let special_pattern = Regex::new(
+            &special_tokens
+                .iter()
+                .map(|&spl| fancy_regex::escape(spl))
+                .collect::<Vec<_>>()
+                .join("|"),
+        )
+        .unwrap();
+
+        Self {
             pattern,
-            special_pattern,
             encoder,
             decoder,
+            special_pattern,
+            special_encoder,
+            special_decoder,
         }
     }
 
+    /// Encodes given text treating any special tokens as ordinary text.
     pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
         let mut ranks = vec![];
         for part in self.pattern.find_iter(text) {
             let bytes = part.unwrap().as_str().as_bytes();
             match self.encoder.get(bytes) {
-                Some(token) => ranks.push(*token),
+                Some(rank) => ranks.push(*rank),
                 None => ranks.extend(self.encode_native(bytes)),
             }
         }
         ranks
     }
 
-    pub fn encode(&self, text: &str, allowed_special: Option<&[&str]>) -> Vec<Rank> {
-        let mut ranks: Vec<Rank> = vec![];
+    /// Encodes text into tokens. If `allowed_special` is none, encodes all special tokens,
+    /// else only considers those special tokens and treats the rest as ordinary text.
+    pub fn encode(&self, text: &str, allowed_special: Option<HashSet<&str>>) -> Vec<Rank> {
+        let mut ranks = vec![];
 
         let mut start = 0;
         loop {
             let special = self.special_pattern.find_from_pos(text, start).unwrap();
-
             match special {
                 Some(special) => {
-                    if let Some(allowed_special) = allowed_special {
+                    if let Some(allowed_special) = &allowed_special {
                         if !allowed_special.contains(&special.as_str()) {
                             start = special.start() + 1;
                             continue;
                         }
                     }
-
-                    let text = &text[start..special.start()];
-                    ranks.extend(self.encode_ordinary(text));
-                    ranks.push(self.encoder[special.as_str().as_bytes()]);
-
-                    start = special.end() + 1;
+                    ranks.extend(self.encode_ordinary(&text[start..special.start()]));
+                    ranks.push(self.special_encoder[special.as_str().as_bytes()]);
+                    start += special.end() + 1;
                 }
-                None => break,
+                None => {
+                    if start != text.len() {
+                        ranks.extend(self.encode_ordinary(&text[start..text.len()]));
+                    }
+                    break;
+                }
             }
         }
         ranks
     }
 
+    /// Decodes tokens back to text. Returns `DecodeKeyError` if token not present in vocabulary.
     pub fn decode_ordinary(&self, tokens: &[Rank]) -> Result<Vec<Byte>, DecodeKeyError> {
         // Decoupling the implementation earlier to avoid code repetition when
         // implementing variants of `decode` method later.
         self.decode_native(tokens)
     }
 
-    pub fn train(data: &str, pattern: &str, vocab_size: Rank, special_tokens: &[&str]) -> Self {
+    ///  Trains the byte pair encoding algorithm and building its vocabulary from scratch.
+    pub fn train(
+        data: &str,
+        pattern: &str,
+        vocab_size: Rank,
+        special_tokens: HashSet<&str>,
+    ) -> Self {
         // Ensure that the vocabulary size is at least 256 to cover all possible byte values.
         assert!(
             vocab_size >= 256,
@@ -209,7 +251,10 @@ impl BytePairTokenizer {
             for part in &parts {
                 for pair in part.windows(2) {
                     let pair = (pair[0], pair[1]);
-                    *stats.entry(pair).or_insert(0) += 1;
+                    stats
+                        .entry(pair)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
                 }
             }
 
@@ -242,29 +287,6 @@ impl BytePairTokenizer {
             }
         }
 
-        // Add special tokens to the end of vocabulary.
-        for &special in special_tokens {
-            let rank = decoder.len() as Rank;
-            let bytes = special.as_bytes().to_vec();
-
-            encoder.insert(bytes.clone(), rank);
-            decoder.insert(rank, bytes);
-        }
-
-        let special_pattern = Regex::new(
-            &special_tokens
-                .iter()
-                .map(|&spl| fancy_regex::escape(spl))
-                .collect::<Vec<_>>()
-                .join("|"),
-        )
-        .unwrap();
-
-        BytePairTokenizer {
-            pattern,
-            special_pattern,
-            encoder,
-            decoder,
-        }
+        Self::new(pattern, encoder, decoder, special_tokens)
     }
 }
