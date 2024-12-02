@@ -2,7 +2,7 @@
 //!
 //! SmolToken is a fast lightweight tokenizer library designed to tokenize text using
 //! Byte Pair Encoding (BPE), a widely-used subword tokenization algorithm. Inspired by OpenAI's
-//! `tiktoken`, SmolToken aims to provide a robust solution for encoding and decoding text,
+//! [`tiktoken`], SmolToken aims to provide a robust solution for encoding and decoding text,
 //! with additional flexibility to train tokenizers from scratch on your own data.
 //!
 //! # Example
@@ -31,6 +31,8 @@
 //! let decoded = tokenizer.decode_ordinary(&encoded).unwrap();
 //! println!("Decoded: {}", decoded);
 //! ```
+//!
+//! [`tiktoken`]: https://github.com/openai/tiktoken
 #![feature(test)]
 
 use std::collections::HashSet;
