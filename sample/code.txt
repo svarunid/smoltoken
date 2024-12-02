@@ -459,14 +459,5 @@ mod bench {
     use test::Bencher;
 
     #[bench]
-    fn train(b: &mut Bencher) {
-        let vocab_size = 500;
-        let data = std::fs::read_to_string("../sample/code.txt").unwrap();
-        let pattern =
-            r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
-
-        b.iter(|| {
-            BytePairTokenizer::train(&data, pattern, vocab_size, HashSet::from(["<|endoftext|>"]))
-        })
-    }
+    fn train(b: &mut Bencher) {}
 }
