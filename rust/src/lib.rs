@@ -292,26 +292,33 @@ impl BytePairTokenizer {
             })
             .collect();
 
-        // This is where the most of the time is spent. This loop needs to be optimized.
-        while decoder.len() < vocab_size as usize {
-            // We are calculating the frequencies of from scratch after each merge. Avoid
-            // this behaviour. Rather incrementally add the frequency of newly merged
-            // pair with the surrounding rank. Hence we can be moved this outside the loop.
-            let mut stats: HashMap<(Rank, Rank), usize> = HashMap::default();
-            for part in &parts {
-                for pair in part.windows(2) {
-                    let pair = (pair[0], pair[1]);
-                    stats
-                        .entry(pair)
-                        .and_modify(|count| *count += 1)
-                        .or_insert(1);
-                }
+        let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
+        for part in &parts {
+            for pair in part.windows(2) {
+                let pair = (pair[0], pair[1]);
+                stats
+                    .entry(pair)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
             }
+        }
 
+        // Okay, now what happens here might seem a bit intimidating. So, let be break it
+        // for ya. Whenever a merge operation is performed, a couple of things happen:
+        // - The frequent pair is merged to form a new token and is removed from `stats`.
+        // - The occurrences of the frequent pair in the `parts` is replaced by the new token.
+        // - Frequencies of new pairs formed with the new token are added to `stats`.
+        // - Frequencies of pairs that contained the ranks in the merged pairs are decremented
+        //   from `stats`.
+        // And that's exactly what happens inside the nested loops.
+        while decoder.len() < vocab_size as usize {
+            // Filters `stats` for entries with frqeuncy greater than `0`.
+            stats.retain(|_, v| *v > 0);
             match stats.iter().max_by_key(|&(_, count)| count) {
                 None => break,
                 Some((&most_common_pair, _)) => {
-                    let rank = decoder.len() as Rank;
+                    let rank = decoder.len() as Rank; // Newly minted token.
+                    stats.remove(&most_common_pair);
 
                     // Retrieve the byte sequences corresponding to the tokens in the most frequent pair.
                     // These byte sequences are obtained from the `decoder` mapping.
@@ -325,8 +332,42 @@ impl BytePairTokenizer {
 
                     for part in &mut parts {
                         let mut i = 0;
-                        while i < part.len() - 1 {
+                        while i + 1 < part.len() {
                             if part[i] == most_common_pair.0 && part[i + 1] == most_common_pair.1 {
+                                // The pair getting merged is `(part[i], part[i+1])`
+                                if i > 0 {
+                                    // Decrement the frequency of pair `(part[i-1], part[i])`
+                                    stats
+                                        .entry((part[i - 1], part[i]))
+                                        .and_modify(|count| *count -= 1);
+
+                                    // Increment the frequency of pair `(part[i-1], rank)`. Also handles `(rank, rank)`
+                                    // when a previous pair is merged.
+                                    stats
+                                        .entry((part[i - 1], rank))
+                                        .and_modify(|count| *count += 1)
+                                        .or_insert(1);
+                                }
+
+                                if i + 2 < part.len() {
+                                    // Decrement the frequency of pair `(part[i+1], part[i+2])`
+                                    stats
+                                        .entry((part[i + 1], part[i + 2]))
+                                        .and_modify(|count| *count -= 1);
+
+                                    if i + 3 < part.len()
+                                        && !(part[i + 2] == most_common_pair.0
+                                            && part[i + 3] == most_common_pair.1)
+                                    {
+                                        // Increment the frequency of pair `(rank, part[i + 2])` only when the next pair is
+                                        // not the `most_common_pair`
+                                        stats
+                                            .entry((rank, part[i + 2]))
+                                            .and_modify(|count| *count += 1)
+                                            .or_insert(1);
+                                    }
+                                }
+
                                 part[i] = rank;
                                 part.remove(i + 1);
                             }
