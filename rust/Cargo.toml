@@ -6,7 +6,9 @@ edition = "2021"
 license-file = "../LICENSE"
 homepage = "https://github.com/svarunid/smoltoken"
 repository = "https://github.com/svarunid/smoltoken/rust"
-readme = false
+readme = "../README.md"
+keywords = ["tokenizer", "bpe", "ai"]
+categories = ["encoding", "text-processing"]
 
 [dependencies]
 fancy-regex = "0.14.0"
