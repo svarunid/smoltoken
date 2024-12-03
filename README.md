@@ -2,7 +2,7 @@
 
 SmolToken is a fast Rust library for tokenizing text using the Byte Pair Encoding (BPE) algorithm. Inspired by OpenAI's [`tiktoken`](https://github.com/openai/tiktoken), SmolToken is designed to fill a critical gap by enabling BPE training from scratch while maintaining high performance for encoding and decoding tasks.
 
-Unlike `tiktoken`, SmolToken supports training tokenizers on custom data. Up to **2.5x faster** than unoptimized educational implementations of `tiktoken`.
+Unlike `tiktoken`, SmolToken supports training tokenizers on custom data. Up to **~1.9x faster** than unoptimized educational implementations of `tiktoken`.
 
 ## Benchmark Results
 
