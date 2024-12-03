@@ -3,6 +3,7 @@ name = "smoltoken"
 description = "A fast library for Byte Pair Encoding (BPE) tokenization."
 version = "0.1.0"
 edition = "2021"
+authors = ["Arun S V <svarunid@gmail.com>"]
 license-file = "../LICENSE"
 homepage = "https://github.com/svarunid/smoltoken"
 repository = "https://github.com/svarunid/smoltoken/rust"
