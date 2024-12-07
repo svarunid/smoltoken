@@ -33,6 +33,7 @@
 //! ```
 //!
 //! [`tiktoken`]: https://github.com/openai/tiktoken
+use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::string::FromUtf8Error;
 
@@ -292,14 +293,16 @@ impl BytePairTokenizer {
             })
             .collect();
 
+        let inc = |e: Entry<(Rank, Rank), isize>| {
+            e.and_modify(|c| *c += 1).or_insert(1);
+        };
+        let dec = |e: Entry<(Rank, Rank), isize>| {
+            e.and_modify(|c| *c -= 1).or_insert(-1);
+        };
         let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
         for part in &parts {
             for pair in part.windows(2) {
-                let pair = (pair[0], pair[1]);
-                stats
-                    .entry(pair)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
+                inc(stats.entry((pair[0], pair[1])));
             }
         }
 
@@ -339,39 +342,19 @@ impl BytePairTokenizer {
                                 if part[i] == most_common_pair.0
                                     && part[i + 1] == most_common_pair.1
                                 {
-                                    // The pair getting merged is `(part[i], part[i+1])`
                                     if i > 0 {
-                                        // Decrement the frequency of pair `(part[i-1], part[i])`
-                                        stats
-                                            .entry((part[i - 1], part[i]))
-                                            .and_modify(|count| *count -= 1)
-                                            .or_insert(-1);
-
-                                        // Increment the frequency of pair `(part[i-1], rank)`. Also handles `(rank, rank)`
-                                        // when a previous pair is the `most_common_pair`
-                                        stats
-                                            .entry((part[i - 1], rank))
-                                            .and_modify(|count| *count += 1)
-                                            .or_insert(1);
+                                        dec(stats.entry((part[i - 1], part[i])));
+                                        inc(stats.entry((part[i - 1], rank)));
                                     }
 
                                     if i + 2 < part.len() {
-                                        // Decrement the frequency of pair `(part[i+1], part[i+2])`
-                                        stats
-                                            .entry((part[i + 1], part[i + 2]))
-                                            .and_modify(|count| *count -= 1)
-                                            .or_insert(-1);
+                                        dec(stats.entry((part[i + 1], part[i + 2])));
 
-                                        // Increment the frequency of pair `(rank, part[i + 2])` only when the next pair is
-                                        // not the `most_common_pair`
                                         if i + 3 < part.len()
                                             && !(part[i + 2] == most_common_pair.0
                                                 && part[i + 3] == most_common_pair.1)
                                         {
-                                            stats
-                                                .entry((rank, part[i + 2]))
-                                                .and_modify(|count| *count += 1)
-                                                .or_insert(1);
+                                            inc(stats.entry((rank, part[i + 2])));
                                         }
                                     }
 
