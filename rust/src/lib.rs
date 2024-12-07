@@ -33,13 +33,11 @@
 //! ```
 //!
 //! [`tiktoken`]: https://github.com/openai/tiktoken
-#![feature(test)]
-
 use std::collections::HashSet;
 use std::string::FromUtf8Error;
 
-// use rayon::prelude::*;
 use fancy_regex::Regex;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
 /// Alias for an unsigned 8-bit integer representing a byte.
@@ -314,9 +312,9 @@ impl BytePairTokenizer {
         //   from `stats`.
         // And that's exactly what happens inside the nested loops.
         while decoder.len() < vocab_size as usize {
-            // Filters `stats` for entries with frqeuncy greater than `0`.
+            // Ensure that the frequencies are not below 0.
             stats.retain(|_, v| *v > 0);
-            match stats.iter().max_by_key(|&(_, count)| count) {
+            match stats.par_iter().max_by_key(|&(_, count)| count) {
                 None => break,
                 Some((&most_common_pair, _)) => {
                     let rank = decoder.len() as Rank; // Newly minted token.
@@ -325,56 +323,72 @@ impl BytePairTokenizer {
                     // Retrieve the byte sequences corresponding to the tokens in the most frequent pair.
                     // These byte sequences are obtained from the `decoder` mapping.
                     let mut bytes = decoder.get(&most_common_pair.0).unwrap().clone();
-                    bytes.extend(decoder.get(&most_common_pair.1).unwrap().clone());
+                    bytes.extend(decoder.get(&most_common_pair.1).unwrap());
 
                     // Add the new symbol to the `encoder` and `decoder` mappings.
                     // This updates the vocabulary with the new merged token.
                     encoder.insert(bytes.clone(), rank);
                     decoder.insert(rank, bytes);
 
-                    for part in &mut parts {
-                        let mut i = 0;
-                        while i + 1 < part.len() {
-                            if part[i] == most_common_pair.0 && part[i + 1] == most_common_pair.1 {
-                                // The pair getting merged is `(part[i], part[i+1])`
-                                if i > 0 {
-                                    // Decrement the frequency of pair `(part[i-1], part[i])`
-                                    stats
-                                        .entry((part[i - 1], part[i]))
-                                        .and_modify(|count| *count -= 1);
-
-                                    // Increment the frequency of pair `(part[i-1], rank)`. Also handles `(rank, rank)`
-                                    // when a previous pair is merged.
-                                    stats
-                                        .entry((part[i - 1], rank))
-                                        .and_modify(|count| *count += 1)
-                                        .or_insert(1);
-                                }
-
-                                if i + 2 < part.len() {
-                                    // Decrement the frequency of pair `(part[i+1], part[i+2])`
-                                    stats
-                                        .entry((part[i + 1], part[i + 2]))
-                                        .and_modify(|count| *count -= 1);
-
-                                    if i + 3 < part.len()
-                                        && !(part[i + 2] == most_common_pair.0
-                                            && part[i + 3] == most_common_pair.1)
-                                    {
-                                        // Increment the frequency of pair `(rank, part[i + 2])` only when the next pair is
-                                        // not the `most_common_pair`
+                    let freqs: Vec<((Rank, Rank), isize)> = parts
+                        .par_iter_mut()
+                        .flat_map(|part| {
+                            let mut i = 0;
+                            let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
+                            while i + 1 < part.len() {
+                                if part[i] == most_common_pair.0
+                                    && part[i + 1] == most_common_pair.1
+                                {
+                                    // The pair getting merged is `(part[i], part[i+1])`
+                                    if i > 0 {
+                                        // Decrement the frequency of pair `(part[i-1], part[i])`
                                         stats
-                                            .entry((rank, part[i + 2]))
+                                            .entry((part[i - 1], part[i]))
+                                            .and_modify(|count| *count -= 1)
+                                            .or_insert(-1);
+
+                                        // Increment the frequency of pair `(part[i-1], rank)`. Also handles `(rank, rank)`
+                                        // when a previous pair is the `most_common_pair`
+                                        stats
+                                            .entry((part[i - 1], rank))
                                             .and_modify(|count| *count += 1)
                                             .or_insert(1);
                                     }
-                                }
 
-                                part[i] = rank;
-                                part.remove(i + 1);
+                                    if i + 2 < part.len() {
+                                        // Decrement the frequency of pair `(part[i+1], part[i+2])`
+                                        stats
+                                            .entry((part[i + 1], part[i + 2]))
+                                            .and_modify(|count| *count -= 1)
+                                            .or_insert(-1);
+
+                                        // Increment the frequency of pair `(rank, part[i + 2])` only when the next pair is
+                                        // not the `most_common_pair`
+                                        if i + 3 < part.len()
+                                            && !(part[i + 2] == most_common_pair.0
+                                                && part[i + 3] == most_common_pair.1)
+                                        {
+                                            stats
+                                                .entry((rank, part[i + 2]))
+                                                .and_modify(|count| *count += 1)
+                                                .or_insert(1);
+                                        }
+                                    }
+
+                                    part[i] = rank;
+                                    part.remove(i + 1);
+                                }
+                                i += 1;
                             }
-                            i += 1;
-                        }
+                            stats
+                        })
+                        .collect();
+
+                    for (pair, freq) in freqs {
+                        stats
+                            .entry(pair)
+                            .and_modify(|count| *count += freq)
+                            .or_insert(freq);
                     }
                 }
             }
@@ -384,7 +398,6 @@ impl BytePairTokenizer {
     }
 }
 
-extern crate test;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,23 +506,5 @@ mod tests {
             .contains_key(&b"<|endoftext|>"[..]));
 
         assert!(tokenizer.special_pattern.is_match("<|endoftext|>").unwrap());
-    }
-}
-
-#[cfg(test)]
-mod bench {
-    use super::*;
-    use test::Bencher;
-
-    #[bench]
-    fn train(b: &mut Bencher) {
-        let vocab_size = 500;
-        let data = std::fs::read_to_string("../sample/code.txt").unwrap();
-        let pattern =
-            r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
-
-        b.iter(|| {
-            BytePairTokenizer::train(&data, pattern, vocab_size, HashSet::from(["<|endoftext|>"]))
-        })
     }
 }

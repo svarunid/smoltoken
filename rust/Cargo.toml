@@ -13,4 +13,5 @@ categories = ["encoding", "text-processing"]
 
 [dependencies]
 fancy-regex = "0.14.0"
+rayon = "1.10.0"
 rustc-hash = "2.0.0"
