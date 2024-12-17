@@ -10,6 +10,7 @@ repository = "https://github.com/svarunid/smoltoken/rust"
 readme = "../README.md"
 keywords = ["tokenizer", "bpe", "ai"]
 categories = ["encoding", "text-processing"]
+exclude = ["src/bin/*"]
 
 [dependencies]
 fancy-regex = "0.14.0"
