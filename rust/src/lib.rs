@@ -28,12 +28,11 @@
 //! println!("Encoded: {:?}", encoded);
 //!
 //! // Decode token ranks back into text.
-//! let decoded = tokenizer.decode_ordinary(&encoded).unwrap();
+//! let decoded = tokenizer.decode(&encoded).unwrap();
 //! println!("Decoded: {}", decoded);
 //! ```
 //!
 //! [`tiktoken`]: https://github.com/openai/tiktoken
-use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::string::FromUtf8Error;
 
@@ -46,8 +45,17 @@ type Byte = u8;
 /// Alias for an unsigned 32-bit integer representing token IDs.
 type Rank = u32;
 
-/// Represents errors that may occur during decoding in the BPE algorithm.
+#[inline(always)]
+fn increment(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
+    stats.entry(pair).and_modify(|c| *c += 1).or_insert(1);
+}
 
+#[inline(always)]
+fn decrement(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
+    stats.entry(pair).and_modify(|c| *c -= 1).or_insert(-1);
+}
+
+/// Represents errors that may occur during decoding in the BPE algorithm.
 #[derive(Debug, Clone)]
 pub enum DecodeError {
     /// Error indicating an invalid (out-of-vocabulary) token.
@@ -57,7 +65,6 @@ pub enum DecodeError {
 }
 
 impl std::fmt::Display for DecodeError {
-    /// Formats the DecodeError for user-friendly output.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TokenError(token) => write!(f, "Invalid token for decoding: {}", token),
@@ -67,7 +74,6 @@ impl std::fmt::Display for DecodeError {
 }
 
 impl From<FromUtf8Error> for DecodeError {
-    /// Converts a FromUtf8Error into a DecodeError::Utf8Error.
     fn from(err: FromUtf8Error) -> Self {
         DecodeError::Utf8Error(err)
     }
@@ -250,7 +256,7 @@ impl BytePairTokenizer {
     }
 
     /// Decodes a sequence of token ranks into a string.
-    pub fn decode_ordinary(&self, tokens: &[Rank]) -> Result<String, DecodeError> {
+    pub fn decode(&self, tokens: &[Rank]) -> Result<String, DecodeError> {
         // Decoupling the implementation earlier to avoid code repetition when
         // implementing variants of `decode` method later.
         Ok(String::from_utf8(self.decode_native(tokens)?)?)
@@ -293,16 +299,10 @@ impl BytePairTokenizer {
             })
             .collect();
 
-        let inc = |e: Entry<(Rank, Rank), isize>| {
-            e.and_modify(|c| *c += 1).or_insert(1);
-        };
-        let dec = |e: Entry<(Rank, Rank), isize>| {
-            e.and_modify(|c| *c -= 1).or_insert(-1);
-        };
         let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
         for part in &parts {
             for pair in part.windows(2) {
-                inc(stats.entry((pair[0], pair[1])));
+                increment(&mut stats, (pair[0], pair[1]));
             }
         }
 
@@ -317,63 +317,61 @@ impl BytePairTokenizer {
         while decoder.len() < vocab_size as usize {
             // Ensure that the frequencies are not below 0.
             stats.retain(|_, v| *v > 0);
-            match stats.par_iter().max_by_key(|&(_, count)| count) {
+
+            let most_common_pair = match stats.par_iter().max_by_key(|&(_, count)| count) {
                 None => break,
                 Some((&most_common_pair, _)) => {
-                    let rank = decoder.len() as Rank; // Newly minted token.
                     stats.remove(&most_common_pair);
-
-                    // Retrieve the byte sequences corresponding to the tokens in the most frequent pair.
-                    // These byte sequences are obtained from the `decoder` mapping.
-                    let mut bytes = decoder.get(&most_common_pair.0).unwrap().clone();
-                    bytes.extend(decoder.get(&most_common_pair.1).unwrap());
-
-                    // Add the new symbol to the `encoder` and `decoder` mappings.
-                    // This updates the vocabulary with the new merged token.
-                    encoder.insert(bytes.clone(), rank);
-                    decoder.insert(rank, bytes);
-
-                    let freqs: Vec<((Rank, Rank), isize)> = parts
-                        .par_iter_mut()
-                        .flat_map(|part| {
-                            let mut i = 0;
-                            let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
-                            while i + 1 < part.len() {
-                                if part[i] == most_common_pair.0
-                                    && part[i + 1] == most_common_pair.1
-                                {
-                                    if i > 0 {
-                                        dec(stats.entry((part[i - 1], part[i])));
-                                        inc(stats.entry((part[i - 1], rank)));
-                                    }
-
-                                    if i + 2 < part.len() {
-                                        dec(stats.entry((part[i + 1], part[i + 2])));
-
-                                        if i + 3 < part.len()
-                                            && !(part[i + 2] == most_common_pair.0
-                                                && part[i + 3] == most_common_pair.1)
-                                        {
-                                            inc(stats.entry((rank, part[i + 2])));
-                                        }
-                                    }
-
-                                    part[i] = rank;
-                                    part.remove(i + 1);
-                                }
-                                i += 1;
-                            }
-                            stats
-                        })
-                        .collect();
-
-                    for (pair, freq) in freqs {
-                        stats
-                            .entry(pair)
-                            .and_modify(|count| *count += freq)
-                            .or_insert(freq);
-                    }
+                    [most_common_pair.0, most_common_pair.1]
                 }
+            };
+
+            let rank = decoder.len() as Rank; // Newly minted token.
+
+            // Retrieve the byte sequences corresponding to the tokens in the most frequent pair.
+            // These byte sequences are obtained from the `decoder` mapping.
+            let mut bytes = decoder.get(&most_common_pair[0]).unwrap().clone();
+            bytes.extend(decoder.get(&most_common_pair[1]).unwrap());
+
+            // Add the new symbol to the `encoder` and `decoder` mappings.
+            // This updates the vocabulary with the new merged token.
+            encoder.insert(bytes.clone(), rank);
+            decoder.insert(rank, bytes);
+
+            let freqs: Vec<((Rank, Rank), isize)> = parts
+                .par_iter_mut()
+                .flat_map(|part| {
+                    let mut i = 0;
+                    let mut stats = HashMap::default();
+                    while i + 1 < part.len() {
+                        if part[i..i + 2] == most_common_pair {
+                            if i > 0 {
+                                decrement(&mut stats, (part[i - 1], part[i]));
+                                increment(&mut stats, (part[i - 1], rank));
+                            }
+
+                            if i + 2 < part.len() {
+                                decrement(&mut stats, (part[i + 1], part[i + 2]));
+
+                                if i + 3 < part.len() && part[i + 2..i + 4] != most_common_pair {
+                                    increment(&mut stats, (rank, part[i + 2]));
+                                }
+                            }
+
+                            part[i] = rank;
+                            part.remove(i + 1);
+                        }
+                        i += 1;
+                    }
+                    stats
+                })
+                .collect();
+
+            for (pair, freq) in freqs {
+                stats
+                    .entry(pair)
+                    .and_modify(|count| *count += freq)
+                    .or_insert(freq);
             }
         }
 
@@ -445,12 +443,12 @@ mod tests {
         let tok = setup();
 
         assert_eq!(
-            tok.decode_ordinary(&[0, 1, 2, 15, 3, 4, 5, 6, 7]).unwrap(),
+            tok.decode(&[0, 1, 2, 15, 3, 4, 5, 6, 7]).unwrap(),
             "Hello<|endoftext|>, world!"
         );
 
         assert_eq!(
-            tok.decode_ordinary(&[0, 1, 2, 3, 4, 5, 6, 7]).unwrap(),
+            tok.decode(&[0, 1, 2, 3, 4, 5, 6, 7]).unwrap(),
             "Hello, world!"
         );
     }
@@ -460,7 +458,7 @@ mod tests {
         let tok = setup();
 
         matches!(
-            tok.decode_ordinary(&[200, 300]).unwrap_err(),
+            tok.decode(&[200, 300]).unwrap_err(),
             DecodeError::TokenError(_)
         );
     }
