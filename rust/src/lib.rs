@@ -412,6 +412,13 @@ mod tests {
         BytePairTokenizer::new(pattern, encoder, decoder, special_tokens)
     }
 
+    fn train_setup(vocab_size: Rank) -> BytePairTokenizer {
+        let data = "abababcd";
+        let pattern = r"\S+|\s+\S+";
+        let special_tokens: HashSet<&str> = HashSet::from(["<|endoftext|>"]);
+        BytePairTokenizer::train(data, pattern, vocab_size, special_tokens)
+    }
+
     #[test]
     fn encode_without_special_tokens() {
         let tok = setup();
@@ -454,22 +461,29 @@ mod tests {
     }
 
     #[test]
-    fn fail_to_decode() {
-        let tok = setup();
-
-        matches!(
-            tok.decode(&[200, 300]).unwrap_err(),
+    fn decode_fails_with_token_error() {
+        let vocab_size = 260;
+        let tokenizer = train_setup(vocab_size);
+        assert!(matches!(
+            tokenizer.decode(&[200, 300]).unwrap_err(),
             DecodeError::TokenError(_)
-        );
+        ));
+    }
+
+    #[test]
+    fn decode_fails_with_utf8_error() {
+        let vocab_size = 260;
+        let tokenizer = train_setup(vocab_size);
+        assert!(matches!(
+            tokenizer.decode(&[200]).unwrap_err(),
+            DecodeError::Utf8Error(_)
+        ));
     }
 
     #[test]
     fn train_bpe() {
-        let data = "abababcd";
-        let pattern = r"\S+|\s+\S+";
         let vocab_size = 260;
-        let special_tokens: HashSet<&str> = HashSet::from(["<|endoftext|>"]);
-        let tokenizer = BytePairTokenizer::train(data, pattern, vocab_size, special_tokens);
+        let tokenizer = train_setup(vocab_size);
 
         let encoder = tokenizer.encoder;
         let decoder = tokenizer.decoder;
