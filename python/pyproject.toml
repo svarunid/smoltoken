@@ -21,12 +21,16 @@ repository = "https://github.com/svarunid/smoltoken"
 module-name = "python._smoltoken"
 python-packages = ["python"]
 python-source = "src"
+extends-python = false
 
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.0,<2.0", "wheel"]
 build-backend = "maturin"
 
 [tool.cibuildwheel]
+build-frontend = "build"
+build-verbosity = 1
+
 skip = [
     "*-manylinux_i686",
     "*-musllinux_i686",
