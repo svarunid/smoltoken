@@ -35,3 +35,4 @@ skip = [
     "*-musllinux_aarch64",
 ]
 macos.archs = ["x86_64", "arm64"]
+macos.before-all = "rustup target add aarch64-apple-darwin x86_64-apple-darwin"
