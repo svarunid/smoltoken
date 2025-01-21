@@ -20,11 +20,22 @@ jobs:
         with:
           toolchain: nightly
 
-      - name: Build wheels
+      - name: Build wheels for macOS Python 3.11
+        if: matrix.os == 'macos-latest' && matrix.python-version == '3.11'
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_BUILD: "cp${{ matrix.python-version}}-*"
-          CIBW_ENVIRONMENT: ${{ (matrix.os == 'macos-latest' && matrix.python-version == '3.11') && 'MACOSX_DEPLOYMENT_TARGET=10.12' || '' }}
+          CIBW_ENVIRONMENT: MACOSX_DEPLOYMENT_TARGET=10.12
+        with:
+          package-dir: python
+          output-dir: wheelhouse
+          config-file: "{package}/pyproject.toml"
+
+      - name: Build wheels (default)
+        if: matrix.os != 'macos-latest' || matrix.python-version != '3.11'
+        uses: pypa/cibuildwheel@v2.22.0
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version}}-*"
         with:
           package-dir: python
           output-dir: wheelhouse
