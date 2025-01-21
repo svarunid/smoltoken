@@ -37,6 +37,7 @@ use std::collections::HashSet;
 use std::string::FromUtf8Error;
 
 use fancy_regex::Regex;
+use kdam::{tqdm, BarExt};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -286,6 +287,7 @@ impl BytePairTokenizer {
 
         // Use the provided regex pattern to split the input data into words.
         // Split the word into individual bytes and convert them to `Vec<Ranks>`.
+        println!("Splitting data into sub-words based on the pattern...");
         let pattern = Regex::new(pattern).unwrap();
         let mut parts: Vec<Vec<Rank>> = pattern
             .find_iter(data)
@@ -314,6 +316,8 @@ impl BytePairTokenizer {
         // - Frequencies of pairs that contained the ranks in the merged pairs are decremented
         //   from `stats`.
         // And that's exactly what happens inside the nested loops.
+        println!("Starting to build vocabulary...");
+        let mut pb = tqdm!(total = vocab_size as usize);
         while decoder.len() < vocab_size as usize {
             // Ensure that the frequencies are not below 0.
             stats.retain(|_, v| *v > 0);
@@ -373,6 +377,7 @@ impl BytePairTokenizer {
                     .and_modify(|count| *count += freq)
                     .or_insert(freq);
             }
+            let _ = pb.update(1);
         }
 
         Self::new(pattern, encoder, decoder, special_tokens)

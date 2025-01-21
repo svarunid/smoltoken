@@ -1,0 +1,16 @@
+[project]
+name = "smoltoken"
+version = "0.1.0"
+description = "A fast library for Byte Pair Encoding (BPE) tokenization."
+authors = [{ name = "Arun S V", email = "svarunid@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.maturin]
+module-name = "python._smoltoken"
+python-packages = ["python"]
+python-source = "src"
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
