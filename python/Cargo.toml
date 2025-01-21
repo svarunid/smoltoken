@@ -12,5 +12,8 @@ crate-type = ["cdylib"]
 fancy-regex = "0.14.0"
 rayon = "1.10.0"
 rustc-hash = "2.0.0"
-pyo3 = { version = "0.22.4", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.22.4", default-features = false, features = [
+    "extension-module",
+    "macros",
+] }
 kdam = "0.6.2"
