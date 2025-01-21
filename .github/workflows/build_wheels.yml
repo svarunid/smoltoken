@@ -24,6 +24,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_BUILD: "cp${{ matrix.python-version}}-*"
+          CIBW_ENVIRONMENT: ${{ (matrix.os == 'macos-latest' && matrix.python-version == '3.11') && 'MACOSX_DEPLOYMENT_TARGET=10.12' || '' }}
         with:
           package-dir: python
           output-dir: wheelhouse
