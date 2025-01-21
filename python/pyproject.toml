@@ -35,4 +35,7 @@ skip = [
     "*-musllinux_aarch64",
 ]
 macos.archs = ["x86_64", "arm64"]
+
+linux.before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+linux.environment = { PATH = "$PATH:$HOME/.cargo/bin" }
 macos.before-all = "rustup target add aarch64-apple-darwin x86_64-apple-darwin"
