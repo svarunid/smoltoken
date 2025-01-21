@@ -2,9 +2,20 @@
 name = "smoltoken"
 version = "0.1.0"
 description = "A fast library for Byte Pair Encoding (BPE) tokenization."
+license = { file = "../LICENSE" }
+readme = { file = "../README.md", content-type = "text/markdown" }
 authors = [{ name = "Arun S V", email = "svarunid@gmail.com" }]
+keywords = ["tokenizer", "bpe", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+]
 requires-python = ">=3.12"
 dependencies = []
+
+[project.urls]
+repository = "https://github.com/svarunid/smoltoken"
 
 [tool.maturin]
 module-name = "python._smoltoken"
@@ -14,3 +25,13 @@ python-source = "src"
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[tool.cibuildwheel]
+skip = [
+    "*-manylinux_i686",
+    "*-musllinux_i686",
+    "*-win32",
+    "*-manylinux_aarch64",
+    "*-musllinux_aarch64",
+]
+macos.archs = ["x86_64", "arm64"]

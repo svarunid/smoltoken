@@ -1,0 +1,30 @@
+name: Build wheels
+
+on: [push, pull_request]
+
+jobs:
+  build_wheels:
+    name: py${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: [39, 310, 311, 312, 313]
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install minimal nightly
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+
+      - uses: pypa/cibuildwheel@v2.21.2
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version}}-*"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
+          path: ./wheelhouse/*.whl
