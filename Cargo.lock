@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "smoltoken"
-version = "0.1.1-rc.4"
+version = "0.1.1-rc.5"
 dependencies = [
  "fancy-regex",
  "kdam",
