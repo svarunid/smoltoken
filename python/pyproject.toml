@@ -3,7 +3,7 @@ name = "smoltoken"
 version = "0.1.2"
 description = "A fast library for Byte Pair Encoding (BPE) tokenization."
 license = { file = "../LICENSE" }
-readme = { file = "../README.md", content-type = "markdown" }
+readme = { file = "../README.md", content-type = "text/markdown" }
 authors = [{ name = "Arun S V", email = "svarunid@gmail.com" }]
 keywords = ["tokenizer", "bpe", "ai"]
 classifiers = [
