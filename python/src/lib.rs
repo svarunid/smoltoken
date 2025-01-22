@@ -177,17 +177,19 @@ impl BytePairTokenizer {
 
 #[pymethods]
 impl BytePairTokenizer {
-    pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
-        let regex = self.get_tl_regex();
-        let mut ranks = vec![];
-        for part in regex.find_iter(text) {
-            let bytes = part.unwrap().as_str().as_bytes();
-            match self.encoder.get(bytes) {
-                Some(rank) => ranks.push(*rank),
-                None => ranks.extend(self.encode_native(bytes)),
+    pub fn encode_ordinary(&self, py: Python, text: &str) -> Vec<Rank> {
+        py.allow_threads(|| {
+            let regex = self.get_tl_regex();
+            let mut ranks = vec![];
+            for part in regex.find_iter(text) {
+                let bytes = part.unwrap().as_str().as_bytes();
+                match self.encoder.get(bytes) {
+                    Some(rank) => ranks.push(*rank),
+                    None => ranks.extend(self.encode_native(bytes)),
+                }
             }
-        }
-        ranks
+            ranks
+        })
     }
 
     pub fn encode(
@@ -201,7 +203,20 @@ impl BytePairTokenizer {
                 allowed_special.iter().map(|s| s.as_ref()).collect();
 
             let mut ranks = vec![];
+            let regex = self.get_tl_regex();
             let special_regex = self.get_tl_special_regex();
+
+            let encode = |text| {
+                let mut ranks = vec![];
+                for part in regex.find_iter(text) {
+                    let bytes = part.unwrap().as_str().as_bytes();
+                    match self.encoder.get(bytes) {
+                        Some(rank) => ranks.push(*rank),
+                        None => ranks.extend(self.encode_native(bytes)),
+                    }
+                }
+                ranks
+            };
 
             let mut start = 0;
             loop {
@@ -212,13 +227,13 @@ impl BytePairTokenizer {
                             start = special.start() + 1;
                             continue;
                         }
-                        ranks.extend(self.encode_ordinary(&text[start..special.start()]));
+                        ranks.extend(encode(&text[start..special.start()]));
                         ranks.push(self.special_encoder[special.as_str().as_bytes()]);
                         start += special.end();
                     }
                     None => {
                         if start != text.len() {
-                            ranks.extend(self.encode_ordinary(&text[start..text.len()]));
+                            ranks.extend(encode(&text[start..text.len()]));
                         }
                         break;
                     }
