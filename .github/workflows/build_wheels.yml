@@ -46,3 +46,26 @@ jobs:
         with:
           name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        name: Install Python
+        with:
+          python-version: "3.9"
+      - name: Run check-manifest
+        run: |
+          pip install check-manifest
+          check-manifest -v
+      - name: Build sdist
+        run: |
+          pip install --upgrade build
+          python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: ./dist/*.tar.gz

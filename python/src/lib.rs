@@ -4,10 +4,10 @@ use std::thread;
 
 use fancy_regex::Regex;
 use kdam::{tqdm, BarExt};
-use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::PyBytes;
 use pyo3::PyResult;
+use pyo3::{exceptions, prelude::*};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -256,7 +256,7 @@ impl BytePairTokenizer {
         pattern: &str,
         vocab_size: Rank,
         special_tokens: HashSet<PyBackedStr>,
-    ) -> Self {
+    ) -> PyResult<Self> {
         assert!(
             vocab_size >= 256,
             "Vocabulary size should atleast be 256 to cover all individual bytes"
@@ -267,8 +267,10 @@ impl BytePairTokenizer {
         let mut decoder: HashMap<Rank, Vec<Byte>> =
             (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
 
+        let pattern = Regex::new(pattern)
+            .map_err(|e| PyErr::new::<exceptions::PyValueError, _>(e.to_string()))?;
+
         println!("Splitting data into sub-words based on the pattern...");
-        let pattern = Regex::new(pattern).unwrap();
         let mut parts: Vec<Vec<Rank>> = pattern
             .find_iter(data)
             .map(|part| {
@@ -346,7 +348,7 @@ impl BytePairTokenizer {
         }
 
         let special_tokens = special_tokens.iter().map(|s| s.to_string()).collect();
-        Self::new(pattern, encoder, decoder, special_tokens)
+        Ok(Self::new(pattern, encoder, decoder, special_tokens))
     }
 }
 
