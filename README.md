@@ -37,7 +37,7 @@ pip install smoltoken
 
 - [x] **Concurrency**: Add multi-threading support using `rayon` for faster training, encoding, and decoding.
 - [x] **Python Bindings**: Integrate with Python using `PyO3` to make it accessible for Python developers.
-- [ ] **Serialization**: Add serialization support to save/load trained tokenizer vocabulary.
+- [x] **Serialization**: Add serialization support to save/load trained tokenizer vocabulary.
 
 ## Contributing
 

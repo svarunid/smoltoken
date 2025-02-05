@@ -14,6 +14,7 @@
 //! use smoltoken::BytePairTokenizer;
 //!
 //! // Define a simple pattern and some training data.
+//! let name = String::from("simple_tokenizer");
 //! let pattern = Regex::new(r"\w+|\S").unwrap();
 //! let data = "hello hello world";
 //!
@@ -21,10 +22,10 @@
 //! let special_tokens: HashSet<&str> = HashSet::from(["<unk>", "<pad>"]);
 //!
 //! // Train a BPE tokenizer with a vocabulary size of 300.
-//! let tokenizer = BytePairTokenizer::train(data, r"\w+|\S", 300, special_tokens.clone());
+//! let tokenizer = BytePairTokenizer::train(name, data, r"\w+|\S", 300, special_tokens.clone());
 //!
 //! // Encode text into token ranks.
-//! let encoded = tokenizer.encode("hello <unk> world", special_tokens.clone());
+//! let encoded = tokenizer.encode("hello <unk> world", &special_tokens);
 //! println!("Encoded: {:?}", encoded);
 //!
 //! // Decode token ranks back into text.
@@ -33,9 +34,14 @@
 //! ```
 //!
 //! [`tiktoken`]: https://github.com/openai/tiktoken
-use std::collections::HashSet;
+use std::io::{BufRead, BufReader, BufWriter, Error, Write};
+use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use std::string::FromUtf8Error;
+use std::thread;
+use std::{collections::HashSet, fs::File};
 
+use base64::prelude::*;
 use fancy_regex::Regex;
 use kdam::{tqdm, BarExt};
 use rayon::prelude::*;
@@ -45,6 +51,8 @@ use rustc_hash::FxHashMap as HashMap;
 type Byte = u8;
 /// Alias for an unsigned 32-bit integer representing token IDs.
 type Rank = u32;
+
+const MAX_NUM_THREADS: usize = 128;
 
 #[inline(always)]
 fn increment(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
@@ -65,6 +73,16 @@ pub enum DecodeError {
     Utf8Error(FromUtf8Error),
 }
 
+pub struct FakeThreadId(NonZeroU64);
+fn hash_current_thread() -> usize {
+    const _: [u8; 8] = [0; std::mem::size_of::<std::thread::ThreadId>()];
+    const _: [u8; 8] = [0; std::mem::size_of::<FakeThreadId>()];
+    let x = unsafe {
+        std::mem::transmute::<std::thread::ThreadId, FakeThreadId>(thread::current().id()).0
+    };
+    u64::from(x) as usize
+}
+
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -82,15 +100,24 @@ impl From<FromUtf8Error> for DecodeError {
 
 /// A tokenizer that uses byte pair encoding algorithm to encode/decode text.
 pub struct BytePairTokenizer {
-    pattern: Regex,
+    name: String,
+    pattern: Vec<Regex>,
     encoder: HashMap<Vec<Byte>, Rank>,
     decoder: HashMap<Rank, Vec<Byte>>,
-    special_pattern: Regex,
+    special_pattern: Vec<Regex>,
     special_encoder: HashMap<Vec<Byte>, Rank>,
     special_decoder: HashMap<Rank, Vec<Byte>>,
 }
 
 impl BytePairTokenizer {
+    fn get_tl_regex(&self) -> &Regex {
+        &self.pattern[hash_current_thread() % MAX_NUM_THREADS]
+    }
+
+    fn get_tl_special_regex(&self) -> &Regex {
+        &self.special_pattern[hash_current_thread() % MAX_NUM_THREADS]
+    }
+
     fn encode_native(&self, bytes: &[Byte]) -> Vec<Rank> {
         if bytes.len() == 1 {
             return vec![self.encoder[bytes]];
@@ -177,12 +204,14 @@ impl BytePairTokenizer {
 impl BytePairTokenizer {
     /// Creates a new `BytePairTokenizer` with the specified pattern, encoder, decoder, and special tokens.
     pub fn new(
+        name: String,
         pattern: Regex,
         encoder: HashMap<Vec<Byte>, Rank>,
         decoder: HashMap<Rank, Vec<Byte>>,
         special_tokens: HashSet<&str>,
     ) -> Self {
         let mut rank = encoder.len() as Rank;
+        let pattern = (0..MAX_NUM_THREADS).map(|_| pattern.clone()).collect();
         let mut special_encoder = HashMap::default();
         let mut special_decoder = HashMap::default();
         for &special in &special_tokens {
@@ -201,8 +230,12 @@ impl BytePairTokenizer {
                 .join("|"),
         )
         .unwrap();
+        let special_pattern = (0..MAX_NUM_THREADS)
+            .map(|_| special_pattern.clone())
+            .collect();
 
         Self {
+            name,
             pattern,
             encoder,
             decoder,
@@ -215,7 +248,8 @@ impl BytePairTokenizer {
     /// Encodes a given text into token ranks using ordinary (non-special) tokens.
     pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
         let mut ranks = vec![];
-        for part in self.pattern.find_iter(text) {
+        let regex = self.get_tl_regex();
+        for part in regex.find_iter(text) {
             let bytes = part.unwrap().as_str().as_bytes();
             match self.encoder.get(bytes) {
                 Some(rank) => ranks.push(*rank),
@@ -225,14 +259,23 @@ impl BytePairTokenizer {
         ranks
     }
 
+    /// Encodes an array of text a vector of token ranks using ordinary (non-special) tokens.
+    pub fn encode_ordinary_batch(&self, batch: &[&str]) -> Vec<Vec<Rank>> {
+        batch
+            .par_iter()
+            .map(|text| self.encode_ordinary(text))
+            .collect()
+    }
+
     /// Encodes a given text into token ranks, allowing specified special tokens.
-    pub fn encode(&self, text: &str, allowed_special: HashSet<&str>) -> Vec<Rank> {
+    pub fn encode(&self, text: &str, allowed_special: &HashSet<&str>) -> Vec<Rank> {
         let mut ranks = vec![];
+        let special_regex = self.get_tl_special_regex();
 
         let mut start = 0;
         loop {
             // Find the next occurrence of a special token.
-            let special = self.special_pattern.find_from_pos(text, start).unwrap();
+            let special = special_regex.find_from_pos(text, start).unwrap();
             match special {
                 Some(special) => {
                     // Skip if the special token is not allowed.
@@ -256,6 +299,14 @@ impl BytePairTokenizer {
         ranks
     }
 
+    /// Encodes an array of text into a vector of token ranks, allowing specified special tokens.
+    pub fn encode_batch(&self, batch: &[&str], allowed_special: &HashSet<&str>) -> Vec<Vec<Rank>> {
+        batch
+            .par_iter()
+            .map(|text| self.encode(text, &allowed_special))
+            .collect()
+    }
+
     /// Decodes a sequence of token ranks into a string.
     pub fn decode(&self, tokens: &[Rank]) -> Result<String, DecodeError> {
         // Decoupling the implementation earlier to avoid code repetition when
@@ -263,8 +314,14 @@ impl BytePairTokenizer {
         Ok(String::from_utf8(self.decode_native(tokens)?)?)
     }
 
+    /// Decode an array of sequence of token ranks into a vector of strings.
+    pub fn decode_batch(&self, batch: &[&[Rank]]) -> Vec<Result<String, DecodeError>> {
+        batch.par_iter().map(|tokens| self.decode(tokens)).collect()
+    }
+
     /// Trains a Byte Pair Encoding tokenizer on the given data with the specified vocabulary size.
     pub fn train(
+        name: String,
         data: &str,
         pattern: &str,
         vocab_size: Rank,
@@ -275,15 +332,6 @@ impl BytePairTokenizer {
             vocab_size >= 256,
             "Vocabulary size should atleast be 256 to cover all individual bytes"
         );
-
-        // Initialize the encoder and decoder with all possible single-byte tokens.
-        // The encoder maps sequences of bytes (Vec<Byte>) to their corresponding token IDs (Rank).
-        let mut encoder: HashMap<Vec<Byte>, Rank> =
-            (0..256).map(|b| (vec![b as Byte], b as Rank)).collect();
-
-        // The decoder maps token IDs back to their byte sequences.
-        let mut decoder: HashMap<Rank, Vec<Byte>> =
-            (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
 
         // Use the provided regex pattern to split the input data into words.
         // Split the word into individual bytes and convert them to `Vec<Ranks>`.
@@ -308,6 +356,17 @@ impl BytePairTokenizer {
             }
         }
 
+        // Initialize the encoder and decoder with all possible single-byte tokens.
+        // The encoder maps sequences of bytes (Vec<Byte>) to their corresponding token IDs (Rank).
+        println!("Starting to build vocabulary...");
+        let mut pb = tqdm!(total = vocab_size as usize);
+        let mut encoder: HashMap<Vec<Byte>, Rank> =
+            (0..256).map(|b| (vec![b as Byte], b as Rank)).collect();
+
+        // The decoder maps token IDs back to their byte sequences.
+        let mut decoder: HashMap<Rank, Vec<Byte>> =
+            (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
+
         // Okay, now what happens here might seem a bit intimidating. So, let be break it
         // for ya. Whenever a merge operation is performed, a couple of things happen:
         // - The frequent pair is merged to form a new token and is removed from `stats`.
@@ -316,14 +375,17 @@ impl BytePairTokenizer {
         // - Frequencies of pairs that contained the ranks in the merged pairs are decremented
         //   from `stats`.
         // And that's exactly what happens inside the nested loops.
-        println!("Starting to build vocabulary...");
-        let mut pb = tqdm!(total = vocab_size as usize);
+        let _ = pb.update(256);
         while decoder.len() < vocab_size as usize {
             // Ensure that the frequencies are not below 0.
             stats.retain(|_, v| *v > 0);
 
             let most_common_pair = match stats.par_iter().max_by_key(|&(_, count)| count) {
-                None => break,
+                None => {
+                    println!("Warning: Ran out of pairs before reaching target vocabulary size");
+                    println!("Final vocabulary size: {}", decoder.len());
+                    break;
+                }
                 Some((&most_common_pair, _)) => {
                     stats.remove(&most_common_pair);
                     [most_common_pair.0, most_common_pair.1]
@@ -379,8 +441,66 @@ impl BytePairTokenizer {
             }
             let _ = pb.update(1);
         }
+        println!("Vocabulary has been built successfully.");
 
-        Self::new(pattern, encoder, decoder, special_tokens)
+        Self::new(name, pattern, encoder, decoder, special_tokens)
+    }
+
+    /// Save the vocabulary in a `.smtkn` file to a provided directory.
+    pub fn save(&self, dir: &str) -> Result<(), Error> {
+        let dir = Path::new(dir);
+
+        let mut path = PathBuf::from(dir);
+        path.push(Path::new(&format!("{}.smtkn", self.name)));
+
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        let mut sorted: Vec<_> = self.encoder.clone().into_iter().collect();
+        sorted.sort_by_key(|&(_, rank)| rank);
+
+        for (token, rank) in sorted {
+            let encoded_token = BASE64_STANDARD.encode(&token);
+            writeln!(writer, "{} {}", encoded_token, rank)?;
+        }
+
+        Ok(())
+    }
+
+    /// Load the tokenizer from a vocabulary file.
+    pub fn load(path: &str, pattern: &str, special_tokens: HashSet<&str>) -> Result<Self, Error> {
+        let pattern = Regex::new(pattern).unwrap();
+
+        let path = Path::new(path);
+        if path.is_dir() {
+            Err(Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "{} is a directory. Please provide a path to a file with .smtkn extension.",
+                    path.to_str().unwrap()
+                ),
+            ))?
+        }
+
+        let name = String::from(path.file_stem().unwrap().to_str().unwrap());
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        let mut encoder = HashMap::default();
+        let mut decoder = HashMap::default();
+
+        for line in reader.lines() {
+            let line = line.unwrap();
+            let parts: Vec<&str> = line.split(' ').collect();
+
+            let token = BASE64_STANDARD.decode(parts[0]).unwrap();
+            let rank = parts[1].parse::<u32>().unwrap();
+
+            encoder.insert(token.clone(), rank);
+            decoder.insert(rank, token);
+        }
+        Ok(Self::new(name, pattern, encoder, decoder, special_tokens))
     }
 }
 
@@ -389,6 +509,7 @@ mod tests {
     use super::*;
 
     fn setup() -> BytePairTokenizer {
+        let name = String::from("test");
         let pattern = Regex::new(r"\S+|\s+\S+").unwrap();
         let encoder: HashMap<Vec<Byte>, Rank> = HashMap::from_iter(vec![
             (b"He".to_vec(), 0),
@@ -414,14 +535,15 @@ mod tests {
             .collect();
         let special_tokens: HashSet<&str> = HashSet::from(["<|endoftext|>"]);
 
-        BytePairTokenizer::new(pattern, encoder, decoder, special_tokens)
+        BytePairTokenizer::new(name, pattern, encoder, decoder, special_tokens)
     }
 
     fn train_setup(vocab_size: Rank) -> BytePairTokenizer {
         let data = "abababcd";
         let pattern = r"\S+|\s+\S+";
+        let name = String::from("test");
         let special_tokens: HashSet<&str> = HashSet::from(["<|endoftext|>"]);
-        BytePairTokenizer::train(data, pattern, vocab_size, special_tokens)
+        BytePairTokenizer::train(name, data, pattern, vocab_size, special_tokens)
     }
 
     #[test]
@@ -445,7 +567,7 @@ mod tests {
         let allowed_special = HashSet::from(["<|endoftext|>"]);
 
         assert_eq!(
-            tok.encode("Hello<|endoftext|>, world!", allowed_special),
+            tok.encode("Hello<|endoftext|>, world!", &allowed_special),
             &[0, 1, 2, 15, 3, 4, 5, 6, 7]
         );
     }
@@ -504,7 +626,24 @@ mod tests {
         assert!(tokenizer
             .special_encoder
             .contains_key(&b"<|endoftext|>"[..]));
+    }
 
-        assert!(tokenizer.special_pattern.is_match("<|endoftext|>").unwrap());
+    #[test]
+    fn save_and_load() {
+        let vocab_size = 360;
+        let path = "../tmp/";
+        let pattern = r"\S+|\s+\S+";
+        let special_tokens = HashSet::from(["<|endoftext|>"]);
+        let tokenizer = train_setup(vocab_size);
+        let _ = tokenizer.save(path);
+
+        let tokenizer =
+            BytePairTokenizer::load("../tmp/test.smtkn", pattern, special_tokens).unwrap();
+
+        let decoder = tokenizer.decoder;
+
+        assert_eq!(tokenizer.name, "test");
+        assert_eq!(decoder[&256], vec![b'a', b'b']);
+        assert_eq!(decoder[&257], vec![b'a', b'b', b'a', b'b']);
     }
 }

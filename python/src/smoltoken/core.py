@@ -1,13 +1,20 @@
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import functools
+from pathlib import Path
 from typing import List, Sequence, Set
 
 from smoltoken import _smoltoken
 
+
 class NotTrainedError(Exception):
     """Custom exception to indicate that the class instance must be trained before other operations."""
-    def __init__(self, message="You must call the 'train' method before using this method."):
+
+    def __init__(
+        self, message="You must call the 'train' method before using this method."
+    ):
         super().__init__(message)
+
 
 class BytePairTokenizer:
     """A tokenizer that uses byte pair encoding algorithm to encode/decode text."""
@@ -72,3 +79,33 @@ class BytePairTokenizer:
         decoder = functools.partial(self.decode, errors=errors)
         with ThreadPoolExecutor(num_threads) as e:
             return list(e.map(decoder, batch))
+
+    def save(self, path):
+        """Save the vocabulary in a `.smtkn` file to a provided directory."""
+        if not hasattr(self, "_core"):
+            raise NotTrainedError()
+        self._core.save(f"{self.name}.smtkn")
+
+    @classmethod
+    def load(cls, path: str, *, pattern: str, special_tokens: Set[str]):
+        path = Path(path)
+        if path.is_dir():
+            raise ValueError(
+                f"{path} is a directory. Please provide a path to a file with .smtkn extension."
+            )
+
+        encoder = dict()
+        with open(path, "rb") as f:
+            for line in f:
+                token, rank = line.split()
+                token, rank = base64.b64decode(token), int(rank)
+                encoder[token] = rank
+
+        tok = cls(
+            path.name,
+            pattern=pattern,
+            special_tokens=special_tokens,
+            n_vocab=len(encoder),
+        )
+        tok._core = _smoltoken.BytePairTokenizer.load(encoder, pattern, special_tokens)
+        return tok

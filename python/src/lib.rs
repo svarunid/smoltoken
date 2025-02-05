@@ -1,9 +1,12 @@
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use std::thread;
 
+use base64::prelude::*;
 use fancy_regex::Regex;
-use kdam::{tqdm, BarExt};
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::PyBytes;
 use pyo3::PyResult;
@@ -66,7 +69,7 @@ impl BytePairTokenizer {
         &self.special_pattern[hash_current_thread() % MAX_NUM_THREADS]
     }
 
-    pub fn new(
+    fn new(
         pattern: Regex,
         encoder: HashMap<Vec<Byte>, Rank>,
         decoder: HashMap<Rank, Vec<Byte>>,
@@ -262,11 +265,6 @@ impl BytePairTokenizer {
             "Vocabulary size should atleast be 256 to cover all individual bytes"
         );
 
-        let mut encoder: HashMap<Vec<Byte>, Rank> =
-            (0..256).map(|b| (vec![b as Byte], b as Rank)).collect();
-        let mut decoder: HashMap<Rank, Vec<Byte>> =
-            (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
-
         let pattern = Regex::new(pattern)
             .map_err(|e| PyErr::new::<exceptions::PyValueError, _>(e.to_string()))?;
 
@@ -291,11 +289,19 @@ impl BytePairTokenizer {
         }
 
         println!("Starting to build vocabulary...");
-        let mut pb = tqdm!(total = vocab_size as usize);
+        let mut encoder: HashMap<Vec<Byte>, Rank> =
+            (0..256).map(|b| (vec![b as Byte], b as Rank)).collect();
+        let mut decoder: HashMap<Rank, Vec<Byte>> =
+            (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
+
         while decoder.len() < vocab_size as usize {
             stats.retain(|_, v| *v > 0);
             let most_common_pair = match stats.par_iter().max_by_key(|&(_, count)| count) {
-                None => break,
+                None => {
+                    println!("Warning: Ran out of pairs before reaching target vocabulary size");
+                    println!("Final vocabulary size: {}", decoder.len());
+                    break;
+                }
                 Some((&most_common_pair, _)) => {
                     stats.remove(&most_common_pair);
                     [most_common_pair.0, most_common_pair.1]
@@ -344,10 +350,55 @@ impl BytePairTokenizer {
                     .and_modify(|count| *count += freq)
                     .or_insert(freq);
             }
-            let _ = pb.update(1);
         }
+        println!("Vocabulary has been built successfully.");
 
         let special_tokens = special_tokens.iter().map(|s| s.to_string()).collect();
+        Ok(Self::new(pattern, encoder, decoder, special_tokens))
+    }
+
+    pub fn save(&self, name: &str, dir: &str) -> PyResult<()> {
+        let dir = Path::new(dir);
+
+        let mut path = PathBuf::from(dir);
+        path.push(Path::new(name));
+
+        let file = match File::create(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                let error_message = format!("Failed to create file '{}': {}", path.display(), err);
+                Err(pyo3::exceptions::PyOSError::new_err(error_message))?
+            }
+        };
+        let mut writer = BufWriter::new(file);
+
+        let mut sorted: Vec<_> = self.encoder.clone().into_iter().collect();
+        sorted.sort_by_key(|&(_, rank)| rank);
+
+        for (token, rank) in sorted {
+            let encoded_token = BASE64_STANDARD.encode(&token);
+            writeln!(writer, "{} {}", encoded_token, rank)?;
+        }
+
+        Ok(())
+    }
+
+    #[staticmethod]
+    pub fn load(
+        encoder: HashMap<Vec<Byte>, Rank>,
+        pattern: &str,
+        special_tokens: HashSet<PyBackedStr>,
+    ) -> PyResult<Self> {
+        let decoder: HashMap<Rank, Vec<Byte>> = encoder
+            .iter()
+            .map(|(token, rank)| (*rank, token.clone()))
+            .collect();
+
+        let pattern = Regex::new(pattern)
+            .map_err(|e| PyErr::new::<exceptions::PyValueError, _>(e.to_string()))?;
+
+        let special_tokens = special_tokens.iter().map(|s| s.to_string()).collect();
+
         Ok(Self::new(pattern, encoder, decoder, special_tokens))
     }
 }
