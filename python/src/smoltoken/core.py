@@ -11,7 +11,7 @@ class NotTrainedError(Exception):
     """Custom exception to indicate that the class instance must be trained before other operations."""
 
     def __init__(
-        self, message="You must call the 'train' method before using this method."
+        self, message="You must call the 'train' method before calling this method."
     ):
         super().__init__(message)
 
@@ -80,14 +80,15 @@ class BytePairTokenizer:
         with ThreadPoolExecutor(num_threads) as e:
             return list(e.map(decoder, batch))
 
-    def save(self, path):
+    def save(self, dir: str):
         """Save the vocabulary in a `.smtkn` file to a provided directory."""
         if not hasattr(self, "_core"):
             raise NotTrainedError()
-        self._core.save(f"{self.name}.smtkn")
+        self._core.save(f"{self.name}.smtkn", dir)
 
     @classmethod
     def load(cls, path: str, *, pattern: str, special_tokens: Set[str]):
+        """Loads the tokenizer vocabulary from a `.smtkn` file."""
         path = Path(path)
         if path.is_dir():
             raise ValueError(
