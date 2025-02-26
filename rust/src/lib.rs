@@ -11,18 +11,18 @@
 //! use std::collections::HashSet;
 //!
 //! use fancy_regex::Regex;
-//! use smoltoken::BytePairTokenizer;
+//! use smoltoken::{TokenizerDataSource, BytePairTokenizer};
 //!
 //! // Define a simple pattern and some training data.
 //! let name = String::from("simple_tokenizer");
 //! let pattern = Regex::new(r"\w+|\S").unwrap();
-//! let data = "hello hello world";
+//! let data = TokenizerDataSource::Text("hello hello world");
 //!
 //! // Special tokens to be handled explicitly.
 //! let special_tokens: HashSet<&str> = HashSet::from(["<unk>", "<pad>"]);
 //!
 //! // Train a BPE tokenizer with a vocabulary size of 300.
-//! let tokenizer = BytePairTokenizer::train(name, data, r"\w+|\S", 300, special_tokens.clone());
+//! let tokenizer = BytePairTokenizer::train(name, r"\w+|\S", 300, special_tokens.clone(), data).unwrap();
 //!
 //! // Encode text into token ranks.
 //! let encoded = tokenizer.encode("hello <unk> world", &special_tokens);
@@ -38,14 +38,15 @@ use std::io::{BufRead, BufReader, BufWriter, Error, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::string::FromUtf8Error;
-use std::thread;
 use std::{collections::HashSet, fs::File};
+use std::{fs, thread};
 
 use base64::prelude::*;
 use fancy_regex::Regex;
 use kdam::{tqdm, BarExt};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
+use walkdir::WalkDir;
 
 /// Alias for an unsigned 8-bit integer representing a byte.
 type Byte = u8;
@@ -62,6 +63,21 @@ fn increment(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
 #[inline(always)]
 fn decrement(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
     stats.entry(pair).and_modify(|c| *c -= 1).or_insert(-1);
+}
+
+#[inline(always)]
+fn regex_search(text: &str, pattern: &Regex) -> Vec<Vec<Rank>> {
+    pattern
+        .find_iter(text)
+        .map(|m| {
+            m.unwrap()
+                .as_str()
+                .as_bytes()
+                .iter()
+                .map(|&byte| byte as Rank)
+                .collect()
+        })
+        .collect()
 }
 
 /// Represents errors that may occur during decoding in the BPE algorithm.
@@ -95,6 +111,65 @@ impl std::fmt::Display for DecodeError {
 impl From<FromUtf8Error> for DecodeError {
     fn from(err: FromUtf8Error) -> Self {
         DecodeError::Utf8Error(err)
+    }
+}
+
+/// A enum representing different types of input data that can be processed to train
+/// the BPE tokenizer from scratch.
+pub enum TokenizerDataSource<'a> {
+    /// A single string slice holding the data.
+    Text(&'a str),
+    /// Path to directory with text files containing the data.
+    Directory(&'a Path),
+    /// A sequence of string containing the data.
+    Iterable(&'a [&'a str]),
+    /// Iterator generating string slices for tokenizer training.
+    Iterator(Box<dyn Iterator<Item = &'a str> + Send + 'a>),
+}
+
+impl<'a> TokenizerDataSource<'a> {
+    /// Perform regex search on a parallel iterable of text.
+    fn search(self, pattern: &Regex) -> Vec<Vec<Rank>> {
+        match self {
+            Self::Text(text) => regex_search(text, pattern),
+            Self::Directory(path) => {
+                let pattern: Vec<_> = (0..MAX_NUM_THREADS).map(|_| pattern.clone()).collect();
+                let files: Vec<_> = WalkDir::new(path)
+                    .into_iter()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_file())
+                    .collect();
+
+                // Process files in parallel using Rayon.
+                files
+                    .par_iter()
+                    .flat_map(|file| {
+                        let text = fs::read_to_string(file.path()).unwrap();
+                        let pattern = &pattern[hash_current_thread() % MAX_NUM_THREADS];
+                        regex_search(&text, pattern)
+                    })
+                    .collect()
+            }
+            Self::Iterable(iterable) => {
+                let pattern: Vec<_> = (0..MAX_NUM_THREADS).map(|_| pattern.clone()).collect();
+                iterable
+                    .par_iter()
+                    .flat_map(|&text| {
+                        let pattern = &pattern[hash_current_thread() % MAX_NUM_THREADS];
+                        regex_search(text, pattern)
+                    })
+                    .collect()
+            }
+            Self::Iterator(iter) => {
+                let pattern: Vec<_> = (0..MAX_NUM_THREADS).map(|_| pattern.clone()).collect();
+                iter.par_bridge()
+                    .flat_map(|text| {
+                        let pattern = &pattern[hash_current_thread() % MAX_NUM_THREADS];
+                        regex_search(text, pattern)
+                    })
+                    .collect()
+            }
+        }
     }
 }
 
@@ -320,13 +395,13 @@ impl BytePairTokenizer {
     }
 
     /// Trains a Byte Pair Encoding tokenizer on the given data with the specified vocabulary size.
-    pub fn train(
+    pub fn train<'a>(
         name: String,
-        data: &str,
         pattern: &str,
         vocab_size: Rank,
         special_tokens: HashSet<&str>,
-    ) -> Self {
+        data: TokenizerDataSource<'a>,
+    ) -> Result<Self, fancy_regex::Error> {
         // Ensure that the vocabulary size is at least 256 to cover all possible byte values.
         assert!(
             vocab_size >= 256,
@@ -336,18 +411,8 @@ impl BytePairTokenizer {
         // Use the provided regex pattern to split the input data into words.
         // Split the word into individual bytes and convert them to `Vec<Ranks>`.
         println!("Splitting data into sub-words based on the pattern...");
-        let pattern = Regex::new(pattern).unwrap();
-        let mut parts: Vec<Vec<Rank>> = pattern
-            .find_iter(data)
-            .map(|part| {
-                part.unwrap()
-                    .as_str()
-                    .as_bytes()
-                    .iter()
-                    .map(|&b| b as Rank)
-                    .collect()
-            })
-            .collect();
+        let pattern = Regex::new(pattern)?;
+        let mut parts: Vec<Vec<Rank>> = data.search(&pattern);
 
         let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
         for part in &parts {
@@ -380,7 +445,8 @@ impl BytePairTokenizer {
             // Ensure that the frequencies are not below 0.
             stats.retain(|_, v| *v > 0);
 
-            let most_common_pair = match stats.par_iter().max_by_key(|&(_, count)| count) {
+            let most_common_pair: [u32; 2] = match stats.par_iter().max_by_key(|&(_, count)| count)
+            {
                 None => {
                     println!("Warning: Ran out of pairs before reaching target vocabulary size");
                     println!("Final vocabulary size: {}", decoder.len());
@@ -443,7 +509,7 @@ impl BytePairTokenizer {
         }
         println!("Vocabulary has been built successfully.");
 
-        Self::new(name, pattern, encoder, decoder, special_tokens)
+        Ok(Self::new(name, pattern, encoder, decoder, special_tokens))
     }
 
     /// Save the vocabulary in a `.smtkn` file to a provided directory.
@@ -539,11 +605,17 @@ mod tests {
     }
 
     fn train_setup(vocab_size: Rank) -> BytePairTokenizer {
-        let data = "abababcd";
         let pattern = r"\S+|\s+\S+";
         let name = String::from("test");
         let special_tokens: HashSet<&str> = HashSet::from(["<|endoftext|>"]);
-        BytePairTokenizer::train(name, data, pattern, vocab_size, special_tokens)
+        BytePairTokenizer::train(
+            name,
+            pattern,
+            vocab_size,
+            special_tokens,
+            TokenizerDataSource::Text("abababcd"),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -626,6 +698,22 @@ mod tests {
         assert!(tokenizer
             .special_encoder
             .contains_key(&b"<|endoftext|>"[..]));
+    }
+
+    #[test]
+    fn train_from_files() {
+        let vocab_size = 260;
+        let pattern = r"\S+|\s+\S+";
+        let name = String::from("test");
+        let special_tokens: HashSet<&str> = HashSet::from(["<|endoftext|>"]);
+
+        let _ = BytePairTokenizer::train(
+            name,
+            &pattern,
+            vocab_size,
+            special_tokens,
+            TokenizerDataSource::Directory(Path::new("../sample")),
+        );
     }
 
     #[test]

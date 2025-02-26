@@ -1,4 +1,4 @@
-use smoltoken::BytePairTokenizer;
+use smoltoken::{BytePairTokenizer, TokenizerDataSource};
 use std::collections::HashSet;
 use std::time::Instant;
 fn main() {
@@ -11,10 +11,11 @@ fn main() {
     let time = Instant::now();
     BytePairTokenizer::train(
         name,
-        &data,
         pattern,
         vocab_size,
         HashSet::from(["<|endoftext|>"]),
-    );
+        TokenizerDataSource::Text(&data),
+    )
+    .unwrap();
     println!("Time taken: {} sec", time.elapsed().as_secs_f32());
 }

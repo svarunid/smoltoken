@@ -1,7 +1,7 @@
 [package]
 name = "smoltoken"
 description = "A fast library for Byte Pair Encoding (BPE) tokenization."
-version = "1.0.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Arun S V <svarunid@gmail.com>"]
 license-file = "../LICENSE"
@@ -18,3 +18,4 @@ fancy-regex = "0.14.0"
 kdam = "0.6.2"
 rayon = "1.10.0"
 rustc-hash = "2.0.0"
+walkdir = "2"
