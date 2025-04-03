@@ -33,11 +33,10 @@ Or add smoltoken to your Python project via [PyPI](https://pypi.org/):
 pip install smoltoken
 ```
 
-## Roadmap
-
-- [x] **Concurrency**: Add multi-threading support using `rayon` for faster training, encoding, and decoding.
-- [x] **Python Bindings**: Integrate with Python using `PyO3` to make it accessible for Python developers.
-- [x] **Serialization**: Add serialization support to save/load trained tokenizer vocabulary.
+## Features
+- **Concurrency**: Multi-threading support with rayon for accelerated training, encoding, and decoding processes.
+- **Python Bindings**: Seamless integration with Python via PyO3, enabling accessibility for Python developers.
+- **Serialization**: Support for saving and loading trained tokenizer vocabulary through serialization.
 
 ## Contributing
 
