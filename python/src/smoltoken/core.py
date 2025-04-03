@@ -26,7 +26,7 @@ class BytePairTokenizer:
         self._n_vocab = n_vocab
         self._special_tokens = special_tokens
 
-    def train(self, *, data: Union[str, Sequence[str]], path: str):
+    def train(self, *, data: Union[str, Sequence[str]] = None, path: str = None):
         """
         Trains a Byte Pair Encoding tokenizer on the given data with the specified vocabulary size.
 
@@ -53,7 +53,7 @@ class BytePairTokenizer:
                 )
         elif path:
             self._core = _smoltoken.BytePairTokenizer.from_dir(
-                data, self._pattern, self._n_vocab, self._special_tokens
+                path, self._pattern, self._n_vocab, self._special_tokens
             )
 
     def encode_ordinary(self, text: str):

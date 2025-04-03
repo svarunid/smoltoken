@@ -406,7 +406,7 @@ impl BytePairTokenizer {
     }
 
     #[staticmethod]
-    pub fn from_files(
+    pub fn from_dir(
         path: &str,
         pattern: &str,
         vocab_size: Rank,
