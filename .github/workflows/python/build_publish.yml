@@ -3,7 +3,7 @@ name: Build and publish Python wheels
 on:
   push:
     tags:
-      - 'python-v*'
+      - '*'
 
 jobs:
   build_wheels:
