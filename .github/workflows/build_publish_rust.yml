@@ -3,7 +3,7 @@ name: Build and publish Rust package
 on:
   push:
     tags:
-      - '*'
+      - 'rust-v*'
 
 jobs:
   publish:
