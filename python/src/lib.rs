@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -7,12 +7,14 @@ use std::thread;
 
 use base64::prelude::*;
 use fancy_regex::Regex;
+use indicatif::{ProgressBar, ProgressStyle};
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::PyBytes;
 use pyo3::PyResult;
 use pyo3::{exceptions, prelude::*};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
+use walkdir::WalkDir;
 
 type Byte = u8;
 type Rank = u32;
@@ -27,6 +29,113 @@ fn increment(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
 #[inline(always)]
 fn decrement(stats: &mut HashMap<(Rank, Rank), isize>, pair: (Rank, Rank)) {
     stats.entry(pair).and_modify(|c| *c -= 1).or_insert(-1);
+}
+
+#[inline(always)]
+fn regex_search(text: &str, pattern: &Regex) -> Vec<Vec<Rank>> {
+    pattern
+        .find_iter(text)
+        .map(|m| {
+            m.unwrap()
+                .as_str()
+                .as_bytes()
+                .iter()
+                .map(|&byte| byte as Rank)
+                .collect()
+        })
+        .collect()
+}
+
+fn bpe_train(
+    mut parts: Vec<Vec<Rank>>,
+    vocab_size: Rank,
+) -> (HashMap<Vec<Byte>, Rank>, HashMap<Rank, Vec<Byte>>) {
+    assert!(
+        vocab_size >= 256,
+        "Vocabulary size should atleast be 256 to cover all individual bytes"
+    );
+
+    let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
+    for part in &parts {
+        for pair in part.windows(2) {
+            increment(&mut stats, (pair[0], pair[1]));
+        }
+    }
+
+    println!("Starting to build vocabulary...");
+    let pb = ProgressBar::new(vocab_size.into());
+    pb.set_style(
+        ProgressStyle::with_template("{percent}%: {bar} {pos}/{len}")
+            .unwrap()
+            .progress_chars("█ "),
+    );
+
+    let mut encoder: HashMap<Vec<Byte>, Rank> =
+        (0..256).map(|b| (vec![b as Byte], b as Rank)).collect();
+    let mut decoder: HashMap<Rank, Vec<Byte>> =
+        (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
+
+    pb.inc(256);
+    while decoder.len() < vocab_size as usize {
+        stats.retain(|_, v| *v > 0);
+        let most_common_pair = match stats.par_iter().max_by_key(|&(_, count)| count) {
+            None => {
+                println!("Warning: Ran out of pairs before reaching target vocabulary size");
+                println!("Final vocabulary size: {}", decoder.len());
+                break;
+            }
+            Some((&most_common_pair, _)) => {
+                stats.remove(&most_common_pair);
+                [most_common_pair.0, most_common_pair.1]
+            }
+        };
+
+        let rank = decoder.len() as Rank;
+        let mut bytes = decoder.get(&most_common_pair[0]).unwrap().clone();
+        bytes.extend(decoder.get(&most_common_pair[1]).unwrap());
+
+        encoder.insert(bytes.clone(), rank);
+        decoder.insert(rank, bytes);
+
+        let freqs: Vec<((Rank, Rank), isize)> = parts
+            .par_iter_mut()
+            .flat_map(|part| {
+                let mut i = 0;
+                let mut stats = HashMap::default();
+                while i + 1 < part.len() {
+                    if part[i..i + 2] == most_common_pair {
+                        if i > 0 {
+                            decrement(&mut stats, (part[i - 1], part[i]));
+                            increment(&mut stats, (part[i - 1], rank));
+                        }
+
+                        if i + 2 < part.len() {
+                            decrement(&mut stats, (part[i + 1], part[i + 2]));
+
+                            if i + 3 < part.len() && part[i + 2..i + 4] != most_common_pair {
+                                increment(&mut stats, (rank, part[i + 2]));
+                            }
+                        }
+
+                        part[i] = rank;
+                        part.remove(i + 1);
+                    }
+                    i += 1;
+                }
+                stats
+            })
+            .collect();
+
+        for (pair, freq) in freqs {
+            stats
+                .entry(pair)
+                .and_modify(|count| *count += freq)
+                .or_insert(freq);
+        }
+        pb.inc(1);
+    }
+    println!("Vocabulary has been built successfully.");
+    (encoder, decoder)
 }
 
 pub struct FakeThreadId(NonZeroU64);
@@ -61,14 +170,6 @@ pub struct BytePairTokenizer {
 }
 
 impl BytePairTokenizer {
-    fn get_tl_regex(&self) -> &Regex {
-        &self.pattern[hash_current_thread() % MAX_NUM_THREADS]
-    }
-
-    fn get_tl_special_regex(&self) -> &Regex {
-        &self.special_pattern[hash_current_thread() % MAX_NUM_THREADS]
-    }
-
     fn new(
         pattern: Regex,
         encoder: HashMap<Vec<Byte>, Rank>,
@@ -107,6 +208,14 @@ impl BytePairTokenizer {
             special_encoder,
             special_decoder,
         }
+    }
+
+    fn get_tl_regex(&self) -> &Regex {
+        &self.pattern[hash_current_thread() % MAX_NUM_THREADS]
+    }
+
+    fn get_tl_special_regex(&self) -> &Regex {
+        &self.special_pattern[hash_current_thread() % MAX_NUM_THREADS]
     }
 
     fn encode_native(&self, bytes: &[Byte]) -> Vec<Rank> {
@@ -253,106 +362,77 @@ impl BytePairTokenizer {
         }
     }
 
-    #[new]
-    pub fn train(
+    #[staticmethod]
+    pub fn from_text(
         data: &str,
         pattern: &str,
         vocab_size: Rank,
         special_tokens: HashSet<PyBackedStr>,
     ) -> PyResult<Self> {
-        assert!(
-            vocab_size >= 256,
-            "Vocabulary size should atleast be 256 to cover all individual bytes"
-        );
-
         let pattern = Regex::new(pattern)
             .map_err(|e| PyErr::new::<exceptions::PyValueError, _>(e.to_string()))?;
 
-        println!("Splitting data into sub-words based on the pattern...");
-        let mut parts: Vec<Vec<Rank>> = pattern
-            .find_iter(data)
-            .map(|part| {
-                part.unwrap()
-                    .as_str()
-                    .as_bytes()
-                    .iter()
-                    .map(|&b| b as Rank)
-                    .collect()
+        println!("Splitting data into sub-words based on the regex pattern...");
+        let parts: Vec<Vec<Rank>> = regex_search(data, &pattern);
+        let (encoder, decoder) = bpe_train(parts, vocab_size);
+
+        let special_tokens = special_tokens.iter().map(|s| s.to_string()).collect();
+        Ok(Self::new(pattern, encoder, decoder, special_tokens))
+    }
+
+    #[staticmethod]
+    pub fn from_seq(
+        seq: Vec<String>,
+        pattern: &str,
+        vocab_size: Rank,
+        special_tokens: HashSet<PyBackedStr>,
+    ) -> PyResult<Self> {
+        let pattern = Regex::new(pattern)
+            .map_err(|e| PyErr::new::<exceptions::PyValueError, _>(e.to_string()))?;
+        let patterns: Vec<_> = (0..MAX_NUM_THREADS).map(|_| pattern.clone()).collect();
+
+        println!("Splitting data into sub-words based on the regex pattern...");
+        let parts = seq
+            .par_iter()
+            .flat_map(|text| {
+                let pattern = &patterns[hash_current_thread() % MAX_NUM_THREADS];
+                regex_search(&text, pattern)
             })
             .collect();
 
-        let mut stats: HashMap<(Rank, Rank), isize> = HashMap::default();
-        for part in &parts {
-            for pair in part.windows(2) {
-                increment(&mut stats, (pair[0], pair[1]));
-            }
-        }
+        let (encoder, decoder) = bpe_train(parts, vocab_size);
+        let special_tokens = special_tokens.iter().map(|s| s.to_string()).collect();
+        Ok(Self::new(pattern, encoder, decoder, special_tokens))
+    }
 
-        println!("Starting to build vocabulary...");
-        let mut encoder: HashMap<Vec<Byte>, Rank> =
-            (0..256).map(|b| (vec![b as Byte], b as Rank)).collect();
-        let mut decoder: HashMap<Rank, Vec<Byte>> =
-            (0..256).map(|b| (b as Rank, vec![b as Byte])).collect();
+    #[staticmethod]
+    pub fn from_files(
+        path: &str,
+        pattern: &str,
+        vocab_size: Rank,
+        special_tokens: HashSet<PyBackedStr>,
+    ) -> PyResult<Self> {
+        let pattern = Regex::new(pattern)
+            .map_err(|e| PyErr::new::<exceptions::PyValueError, _>(e.to_string()))?;
+        let patterns: Vec<_> = (0..MAX_NUM_THREADS).map(|_| pattern.clone()).collect();
 
-        while decoder.len() < vocab_size as usize {
-            stats.retain(|_, v| *v > 0);
-            let most_common_pair = match stats.par_iter().max_by_key(|&(_, count)| count) {
-                None => {
-                    println!("Warning: Ran out of pairs before reaching target vocabulary size");
-                    println!("Final vocabulary size: {}", decoder.len());
-                    break;
-                }
-                Some((&most_common_pair, _)) => {
-                    stats.remove(&most_common_pair);
-                    [most_common_pair.0, most_common_pair.1]
-                }
-            };
+        let files: Vec<_> = WalkDir::new(path)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .collect();
 
-            let rank = decoder.len() as Rank;
-            let mut bytes = decoder.get(&most_common_pair[0]).unwrap().clone();
-            bytes.extend(decoder.get(&most_common_pair[1]).unwrap());
+        println!("Splitting data into sub-words based on the regex pattern...");
+        let parts: Vec<Vec<Rank>> = files
+            .par_iter()
+            .flat_map(|file| {
+                let text = fs::read_to_string(file.path()).unwrap();
+                let pattern = &patterns[hash_current_thread() % MAX_NUM_THREADS];
+                regex_search(&text, pattern)
+            })
+            .collect();
 
-            encoder.insert(bytes.clone(), rank);
-            decoder.insert(rank, bytes);
-
-            let freqs: Vec<((Rank, Rank), isize)> = parts
-                .par_iter_mut()
-                .flat_map(|part| {
-                    let mut i = 0;
-                    let mut stats = HashMap::default();
-                    while i + 1 < part.len() {
-                        if part[i..i + 2] == most_common_pair {
-                            if i > 0 {
-                                decrement(&mut stats, (part[i - 1], part[i]));
-                                increment(&mut stats, (part[i - 1], rank));
-                            }
-
-                            if i + 2 < part.len() {
-                                decrement(&mut stats, (part[i + 1], part[i + 2]));
-
-                                if i + 3 < part.len() && part[i + 2..i + 4] != most_common_pair {
-                                    increment(&mut stats, (rank, part[i + 2]));
-                                }
-                            }
-
-                            part[i] = rank;
-                            part.remove(i + 1);
-                        }
-                        i += 1;
-                    }
-                    stats
-                })
-                .collect();
-
-            for (pair, freq) in freqs {
-                stats
-                    .entry(pair)
-                    .and_modify(|count| *count += freq)
-                    .or_insert(freq);
-            }
-        }
-        println!("Vocabulary has been built successfully.");
-
+        let (encoder, decoder) = bpe_train(parts, vocab_size);
         let special_tokens = special_tokens.iter().map(|s| s.to_string()).collect();
         Ok(Self::new(pattern, encoder, decoder, special_tokens))
     }

@@ -1,6 +1,6 @@
 [project]
 name = "smoltoken"
-version = "0.1.3"
+version = "0.1.4"
 description = "A light-weight & fast library for Byte Pair Encoding (BPE) tokenization."
 license = { file = "../LICENSE" }
 readme = { file = "../README.md", content-type = "text/markdown" }

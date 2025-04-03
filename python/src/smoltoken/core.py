@@ -1,8 +1,9 @@
 import base64
+import collections
 from concurrent.futures import ThreadPoolExecutor
 import functools
 from pathlib import Path
-from typing import List, Sequence, Set
+from typing import List, Sequence, Set, Union
 
 from smoltoken import _smoltoken
 
@@ -25,11 +26,35 @@ class BytePairTokenizer:
         self._n_vocab = n_vocab
         self._special_tokens = special_tokens
 
-    def train(self, data: str):
-        """Trains a Byte Pair Encoding tokenizer on the given data with the specified vocabulary size."""
-        self._core = _smoltoken.BytePairTokenizer(
-            data, self._pattern, self._n_vocab, self._special_tokens
-        )
+    def train(self, *, data: Union[str, Sequence[str]], path: str):
+        """
+        Trains a Byte Pair Encoding tokenizer on the given data with the specified vocabulary size.
+
+        Args:
+            data:
+                The training data to use. Can be a single string, a sequence of strings,
+                or an iterator yielding strings. Either this or `path` must be provided.
+            path:
+                Path to a directory containing the files
+
+        Raises:
+            AssertionError: If neither `data` nor `path` is provided.
+            ValueError: If any error arises when compiling the regex pattern.
+        """
+        assert data or path, "Either data or path must be provided."
+        if data:
+            if isinstance(data, str):
+                self._core = _smoltoken.BytePairTokenizer.from_text(
+                    data, self._pattern, self._n_vocab, self._special_tokens
+                )
+            elif isinstance(data, collections.abc.Sequence):
+                self._core = _smoltoken.BytePairTokenizer.from_seq(
+                    data, self._pattern, self._n_vocab, self._special_tokens
+                )
+        elif path:
+            self._core = _smoltoken.BytePairTokenizer.from_dir(
+                data, self._pattern, self._n_vocab, self._special_tokens
+            )
 
     def encode_ordinary(self, text: str):
         """Encodes a given text into token ranks using ordinary (non-special) tokens."""
@@ -89,7 +114,7 @@ class BytePairTokenizer:
     @classmethod
     def load(cls, path: str, *, pattern: str, special_tokens: Set[str]):
         """Loads the tokenizer vocabulary from a `.smtkn` file."""
-        path = Path(path)
+        path: Path = Path(path)
         if path.is_dir():
             raise ValueError(
                 f"{path} is a directory. Please provide a path to a file with .smtkn extension."
